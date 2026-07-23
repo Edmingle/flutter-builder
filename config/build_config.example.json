@@ -1,0 +1,8 @@
+{
+  "app_name": "Ideas",
+  "app_bundle_id": "com.edmingle.ideas",
+  "portal_name": "ideas",
+  "web_domain": "www.edmingle.academy",
+  "app_version": "1.0.0",
+  "_comment": "Optional fallback used by replace_config.py when env vars are missing. CLI / env vars always win."
+}

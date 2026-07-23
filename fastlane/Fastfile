@@ -1,0 +1,94 @@
+default_platform(:android)
+
+def resolve_app_path
+  app = ENV["APP"]
+  if app.nil? || app.empty?
+    workspace = ENV["WORKSPACE"]
+    if workspace.nil? || workspace.empty?
+      UI.user_error!("APP or WORKSPACE environment variable must be set")
+    end
+    app = File.join(workspace, "app")
+  end
+  app
+end
+
+def resolve_build_type(options)
+  (options[:buildType] || options[:build_type] || ENV["BUILD_TYPE"] || "2").to_s
+end
+
+platform :android do
+
+  desc "Build Flutter Android APK (buildType=1) or App Bundle (buildType≠1)"
+
+  lane :build do |options|
+    app = resolve_app_path
+    build_type = resolve_build_type(options)
+    flutter_flags = "--flavor=demo --dart-define=ENV=DEMO --release"
+
+    if build_type == "1"
+      UI.message("BUILD_TYPE=1 → building APK")
+      sh("cd #{app} && flutter build apk #{flutter_flags}")
+    else
+      UI.message("BUILD_TYPE=#{build_type} → building App Bundle (AAB)")
+      sh("cd #{app} && flutter build appbundle #{flutter_flags}")
+    end
+  end
+
+  desc "Build then upload to Google Play Store (requires Play Console service-account JSON)"
+
+  lane :release do |options|
+    build(options)
+
+    app = resolve_app_path
+    build_type = resolve_build_type(options)
+    package_name = ENV["APP_BUNDLE_ID"].to_s
+    UI.user_error!("APP_BUNDLE_ID must be set for Play Store upload") if package_name.empty?
+
+    # Play Console API service-account key (NOT Firebase google-services.json)
+    json_key = (
+      options[:playstore_json] ||
+      options[:json_key] ||
+      ENV["PLAYSTORE_JSON"] ||
+      ENV["GOOGLE_PLAY_JSON"] ||
+      ""
+    ).to_s
+
+    if json_key.empty? || !File.exist?(json_key)
+      UI.user_error!(
+        "Play Store service-account JSON not set or missing.\n" \
+        "Pass: playstore_json:/path/to/play-service-account.json\n" \
+        "Or export PLAYSTORE_JSON=/path/to/play-service-account.json\n" \
+        "Note: This is the Google Play Console API key — NOT Firebase google-services.json."
+      )
+    end
+
+    track = (options[:track] || ENV["PLAY_TRACK"] || "internal").to_s
+    release_status = (options[:release_status] || ENV["PLAY_RELEASE_STATUS"] || "draft").to_s
+
+    upload_params = {
+      json_key: json_key,
+      package_name: package_name,
+      track: track,
+      release_status: release_status,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+      skip_upload_changelogs: true
+    }
+
+    if build_type == "1"
+      apk_path = File.join(app, "build/app/outputs/flutter-apk/app-demo-release.apk")
+      UI.user_error!("APK not found at #{apk_path}") unless File.exist?(apk_path)
+      UI.message("Uploading APK to Play Store (track=#{track})...")
+      upload_to_play_store(upload_params.merge(apk: apk_path))
+    else
+      aab_path = File.join(app, "build/app/outputs/bundle/demoRelease/app-demo-release.aab")
+      UI.user_error!("AAB not found at #{aab_path}") unless File.exist?(aab_path)
+      UI.message("Uploading AAB to Play Store (track=#{track})...")
+      upload_to_play_store(upload_params.merge(aab: aab_path))
+    end
+
+    UI.success("Uploaded to Google Play (package=#{package_name}, track=#{track})")
+  end
+
+end

@@ -1,0 +1,33 @@
+# Local / OS junk
+.DS_Store
+*.log
+
+# Secrets / local overrides (keep examples only)
+config/paths.env
+config/build_config.json
+config/builder.json
+**/*service-account*.json
+**/play-store*.json
+
+# Large MobileRTC binary (keep common/mobilertc/ structure on the build host)
+common/mobilertc/mobilertc.aar
+
+# API venv / caches
+server/.venv/
+server/**/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Large / generated outputs (keep directory via .gitkeep)
+output/*
+!output/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Per-build workspaces (git clones + assets)
+workspace/build_*/
+workspace/app/
+workspace/assets/
+
+# Copied into the Flutter android tree during builds
+**/android/fastlane/report.xml
