@@ -62,8 +62,8 @@ platform :android do
       )
     end
 
-    track = (options[:track] || ENV["PLAY_TRACK"] || "internal").to_s
-    release_status = (options[:release_status] || ENV["PLAY_RELEASE_STATUS"] || "draft").to_s
+    track = (options[:track] || ENV["PLAY_TRACK"] || "production").to_s
+    release_status = (options[:release_status] || ENV["PLAY_RELEASE_STATUS"] || "completed").to_s
 
     upload_params = {
       json_key: json_key,
