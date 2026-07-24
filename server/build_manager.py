@@ -74,6 +74,9 @@ class BuildJob:
     build_type: str
     assets_zip_path: str
     workspace: str
+    upload: bool = False
+    playstore_json_path: Optional[str] = None
+    play_track: str = "internal"
     status: BuildStatus = BuildStatus.QUEUED
     error: Optional[str] = None
     build_duration: Optional[int] = None
@@ -277,12 +280,30 @@ class BuildManager:
                     str(build_output_dir),
                 ]
 
+                if job.upload and job.playstore_json_path:
+                    cmd.extend(
+                        [
+                            "--upload",
+                            "--playstore-json",
+                            job.playstore_json_path,
+                            "--play-track",
+                            job.play_track or "internal",
+                        ]
+                    )
+                    log.info(
+                        "Play Store upload enabled for build_id=%s track=%s",
+                        job.build_id,
+                        job.play_track,
+                    )
+
                 env = os.environ.copy()
                 env["CONFIG_DIR"] = str(self.config_dir)
                 # GITHUB_TOKEN already in env — never log it.
 
                 log.info(
-                    "Executing pipeline via build.sh for build_id=%s", job.build_id
+                    "Executing pipeline via build.sh for build_id=%s upload=%s",
+                    job.build_id,
+                    job.upload,
                 )
 
                 result = subprocess.run(

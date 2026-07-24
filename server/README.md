@@ -62,6 +62,7 @@ server calls PHP using `callback_base_url` from `builder.json` (or env
 Only the base changes; `/nuSource/api/v1/support/mobilebuild/callback` is hardcoded.
 
 ```bash
+# build_type=2 → AAB + Play Store upload (playstore-json required)
 curl -X POST "http://127.0.0.1:8080/build" \
   -F build_id=1001 \
   -F institution_id=42 \
@@ -72,17 +73,21 @@ curl -X POST "http://127.0.0.1:8080/build" \
   -F web_domain=www.edmingle.academy \
   -F version_number=1.0.0 \
   -F platform=0 \
-  -F build_type=1 \
-  -F assets=@"/path/to/assets.zip"
+  -F build_type=2 \
+  -F assets=@"/path/to/assets.zip" \
+  -F play-track=internal \
+  -F playstore-json=@"/path/to/play-service-account.json"
 ```
 
 `platform`: `0` = Android, `1` = iOS (only `0` is supported today).  
-`build_type`: `1` = APK, `2` = AAB.
+`build_type`: `1` = APK (build only), `2` = AAB **and** upload to Play Store.  
+For `build_type=2`, `playstore-json` is required (Play Console service-account — **not** Firebase `google-services.json`).  
+`play-track`: `internal` (default) | `alpha` | `beta` | `production`.
 
 Response:
 
 ```json
-{ "success": true, "status": "QUEUED", "build_id": "1001" }
+{ "success": true, "status": "QUEUED", "build_id": "1001", "upload": true }
 ```
 
 ### `GET /build/{build_id}`

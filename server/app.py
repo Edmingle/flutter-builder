@@ -4,6 +4,8 @@ Flutter Build Server — HTTP API (Stage 6)
 POST /build         — validate, save assets.zip, queue job → HTTP 202
 GET  /build/{id}    — build status
 GET  /health        — UP + running_build + queue_size + callback_enabled
+
+build_type=2 (AAB) also uploads to Google Play when playstore-json is provided.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -37,6 +39,7 @@ app = FastAPI(
 )
 
 BUILD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+VALID_PLAY_TRACKS = {"internal", "alpha", "beta", "production"}
 
 # Platform constants (must match PHP / backend contract)
 PLATFORM_ANDROID = "0"
@@ -143,13 +146,19 @@ async def create_build(
     platform: str = Form(PLATFORM_ANDROID),
     build_type: str = Form(...),
     assets: UploadFile = File(..., description="assets.zip from backend"),
+    play_track: Annotated[str, Form(alias="play-track")] = "internal",
+    playstore_json: Annotated[
+        Optional[UploadFile],
+        File(alias="playstore-json"),
+    ] = None,
 ):
     """
     Validate request, create workspace, save assets.zip, enqueue job.
     Returns HTTP 202 immediately — build runs in the background.
 
     platform: 0 = Android, 1 = iOS (only 0 supported today)
-    build_type: 1 = APK, 2 = AAB
+    build_type: 1 = APK (build only), 2 = AAB + Play Store upload
+    For build_type=2, playstore-json (Play Console service-account) is required.
     """
     build_id = require_field("build_id", build_id)
     institution_id = require_field("institution_id", institution_id)
@@ -161,15 +170,20 @@ async def create_build(
     version_number = require_field("version_number", version_number)
     platform = require_field("platform", platform)
     build_type = require_field("build_type", build_type)
+    play_track = (play_track or "internal").strip().lower()
+
+    upload_to_play = build_type == "2"
 
     log.info(
         "Incoming build request build_id=%s institution_id=%s branch=%s "
-        "platform=%s build_type=%s app_name=%s",
+        "platform=%s build_type=%s upload=%s play_track=%s app_name=%s",
         build_id,
         institution_id,
         branch,
         platform,
         build_type,
+        upload_to_play,
+        play_track,
         app_name,
     )
 
@@ -213,6 +227,16 @@ async def create_build(
             },
         )
 
+    if play_track not in VALID_PLAY_TRACKS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "success": False,
+                "build_id": build_id,
+                "error": "play-track must be one of: internal, alpha, beta, production",
+            },
+        )
+
     filename = (assets.filename or "").lower()
     if not filename.endswith(".zip"):
         raise HTTPException(
@@ -223,6 +247,28 @@ async def create_build(
                 "error": "assets must be a .zip file (assets.zip)",
             },
         )
+
+    if upload_to_play:
+        if playstore_json is None or not (playstore_json.filename or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "build_id": build_id,
+                    "error": "build_type=2 requires playstore-json "
+                    "(Play Console service-account JSON, NOT Firebase google-services.json)",
+                },
+            )
+        pj_name = (playstore_json.filename or "").lower()
+        if not pj_name.endswith(".json"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "build_id": build_id,
+                    "error": "playstore-json must be a .json file",
+                },
+            )
 
     cfg = load_builder_config()
     if not (cfg.get("onepub_token") or "").strip():
@@ -249,6 +295,7 @@ async def create_build(
     workspace_root = resolve_workspace_root(cfg)
     build_workspace = workspace_root / f"build_{build_id}"
     assets_zip_path = build_workspace / "assets.zip"
+    playstore_json_path: Optional[str] = None
 
     try:
         log.info("Workspace creation: %s", build_workspace)
@@ -267,6 +314,22 @@ async def create_build(
             )
         assets_zip_path.write_bytes(content)
         log.info("Received assets.zip (%d bytes)", len(content))
+
+        if upload_to_play and playstore_json is not None:
+            dest = build_workspace / "play-service-account.json"
+            pj_bytes = await playstore_json.read()
+            if not pj_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "success": False,
+                        "build_id": build_id,
+                        "error": "playstore-json is empty",
+                    },
+                )
+            dest.write_bytes(pj_bytes)
+            playstore_json_path = str(dest)
+            log.info("Received playstore-json (%d bytes) → %s", len(pj_bytes), dest)
     except HTTPException:
         raise
     except OSError as exc:
@@ -293,6 +356,9 @@ async def create_build(
         build_type=build_type,
         assets_zip_path=str(assets_zip_path),
         workspace=str(build_workspace),
+        upload=upload_to_play,
+        playstore_json_path=playstore_json_path,
+        play_track=play_track,
     )
 
     try:
@@ -309,8 +375,9 @@ async def create_build(
 
     health = get_manager().health()
     log.info(
-        "Accepted build_id=%s status=QUEUED running_build=%s queue_size=%s",
+        "Accepted build_id=%s status=QUEUED upload=%s running_build=%s queue_size=%s",
         build_id,
+        upload_to_play,
         health.get("running_build"),
         health.get("queue_size"),
     )
@@ -321,5 +388,6 @@ async def create_build(
             "success": True,
             "status": "QUEUED",
             "build_id": build_id,
+            "upload": upload_to_play,
         },
     )

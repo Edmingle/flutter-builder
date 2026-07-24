@@ -102,6 +102,7 @@ uvicorn server.app:app --host 0.0.0.0 --port 8080
 ```
 
 ```bash
+# APK only (build_type=1)
 curl -X POST http://127.0.0.1:8080/build \
   -F build_id=101 \
   -F institution_id=55 \
@@ -114,6 +115,22 @@ curl -X POST http://127.0.0.1:8080/build \
   -F platform=0 \
   -F build_type=1 \
   -F assets=@/path/to/assets.zip
+
+# AAB + Play Store upload (build_type=2)
+curl -X POST http://127.0.0.1:8080/build \
+  -F build_id=102 \
+  -F institution_id=55 \
+  -F branch=develop \
+  -F app_name=Ideas \
+  -F bundle_id=com.edmingle.ideas \
+  -F portal_name=ideas \
+  -F web_domain=www.edmingle.academy \
+  -F version_number=1.0.1 \
+  -F platform=0 \
+  -F build_type=2 \
+  -F assets=@/path/to/assets.zip \
+  -F play-track=internal \
+  -F playstore-json=@/path/to/play-service-account.json
 
 curl http://127.0.0.1:8080/build/101
 curl http://127.0.0.1:8080/health
