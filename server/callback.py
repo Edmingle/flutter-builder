@@ -2,8 +2,12 @@
 Backend callback after build completion.
 
 Sends multipart/form-data to callback_url with retries.
-Metadata goes in form field JSONString; files stay as separate parts
-(artifact on success, build_log when available).
+
+Preferred flow (cron provides S3 presigned URLs):
+  1. PUT artifact + build_log to S3
+  2. Callback with JSONString metadata only (no files)
+
+Legacy fallback (no S3 URLs): attach artifact/build_log as multipart files.
 
 Only the PHP base URL is configurable (env CALLBACK_BASE_URL or
 builder.json callback_base_url). The callback path is fixed.
@@ -53,6 +57,68 @@ def _as_int(value: Any, default: Union[int, Any] = 0) -> Any:
         return default
 
 
+def put_file_to_presigned_url(
+    *,
+    url: str,
+    file_path: Path,
+    content_type: str,
+    storage_class: str = "",
+    label: str = "",
+) -> bool:
+    """
+    PUT a local file to an S3 (or compatible) presigned URL.
+    Returns True on HTTP 2xx. Never raises.
+    """
+    if not url:
+        log.error("Presigned URL empty (%s)", label or file_path.name)
+        return False
+    if not file_path.is_file():
+        log.error("File missing for S3 PUT (%s): %s", label or "file", file_path)
+        return False
+
+    headers = {"Content-Type": content_type or "application/octet-stream"}
+    if storage_class:
+        headers["x-amz-storage-class"] = storage_class
+
+    size = file_path.stat().st_size
+    log.info(
+        "S3 PUT %s → %s (%d bytes, content_type=%s storage_class=%s)",
+        label or file_path.name,
+        url.split("?")[0],
+        size,
+        headers["Content-Type"],
+        storage_class or "(none)",
+    )
+
+    try:
+        with file_path.open("rb") as fh:
+            response = requests.put(
+                url,
+                data=fh,
+                headers=headers,
+                timeout=max(120, min(1800, size // (256 * 1024) + 120)),
+            )
+    except requests.RequestException as exc:
+        log.error("S3 PUT failed (%s): %s", label or file_path.name, exc)
+        return False
+
+    if 200 <= response.status_code < 300:
+        log.info(
+            "S3 PUT ok (%s) http=%s",
+            label or file_path.name,
+            response.status_code,
+        )
+        return True
+
+    log.error(
+        "S3 PUT failed (%s) http=%s body=%s",
+        label or file_path.name,
+        response.status_code,
+        (response.text or "")[:500],
+    )
+    return False
+
+
 def discover_artifact(build_output_dir: Path) -> Optional[Path]:
     """
     Find an APK/AAB/IPA in a single build's output directory only.
@@ -71,7 +137,7 @@ def discover_artifact(build_output_dir: Path) -> Optional[Path]:
         return None
 
     newest = max(candidates, key=lambda p: p.stat().st_mtime)
-    log.info("Uploading artifact: %s (%d bytes)", newest, newest.stat().st_size)
+    log.info("Found artifact: %s (%d bytes)", newest, newest.stat().st_size)
     return newest
 
 
@@ -110,6 +176,9 @@ def send_callback(
     end_time: str,
     artifact_path: Optional[Path],
     build_log_path: Optional[Path],
+    version_number: str = "",
+    artifact_filename: str = "",
+    s3_direct: bool = False,
 ) -> bool:
     """
     POST multipart callback with up to 3 attempts.
@@ -117,8 +186,8 @@ def send_callback(
 
     Wire contract (PHP nuSource):
       - JSONString: JSON metadata blob
-      - artifact: file (success only, when available)
-      - build_log: file (when available)
+      - When s3_direct=True: metadata only (files already on S3)
+      - When s3_direct=False (legacy): artifact + build_log file parts
       status inside JSON: 1 = success, 0 = failed
     """
     if not callback_url:
@@ -140,8 +209,14 @@ def send_callback(
         "start_time": start_time,
         "end_time": end_time,
     }
-    data = {"JSONString": json.dumps(payload, separators=(",", ":"))}
+    if version_number:
+        payload["version_number"] = version_number
+    if artifact_filename:
+        payload["artifact_filename"] = artifact_filename
+    if s3_direct:
+        payload["s3_upload"] = 1
 
+    data = {"JSONString": json.dumps(payload, separators=(",", ":"))}
     headers = {"X-API-Key": callback_apikey} if callback_apikey else {}
 
     for attempt, delay in enumerate(RETRY_BACKOFF_SECONDS, start=1):
@@ -155,43 +230,49 @@ def send_callback(
             time.sleep(delay)
         else:
             log.info(
-                "Sending callback build_id=%s attempt=%s url=%s status=%s",
+                "Sending callback build_id=%s attempt=%s url=%s status=%s s3_direct=%s",
                 build_id,
                 attempt,
                 callback_url,
                 status_code,
+                s3_direct,
             )
 
         files: List[Tuple[str, tuple]] = []
         opened = []
         try:
-            if is_success and artifact_path and artifact_path.is_file():
-                log.info(
-                    "Uploading artifact for build_id=%s: %s",
-                    build_id,
-                    artifact_path.name,
-                )
-                fh = open(artifact_path, "rb")
-                opened.append(fh)
-                files.append(
-                    ("artifact", (artifact_path.name, fh, "application/octet-stream"))
-                )
-            elif is_success:
-                log.error(
-                    "artifact missing for successful build_id=%s — "
-                    "sending callback without artifact",
-                    build_id,
-                )
+            if not s3_direct:
+                if is_success and artifact_path and artifact_path.is_file():
+                    log.info(
+                        "Uploading artifact for build_id=%s: %s",
+                        build_id,
+                        artifact_path.name,
+                    )
+                    fh = open(artifact_path, "rb")
+                    opened.append(fh)
+                    files.append(
+                        (
+                            "artifact",
+                            (artifact_path.name, fh, "application/octet-stream"),
+                        )
+                    )
+                elif is_success:
+                    log.error(
+                        "artifact missing for successful build_id=%s — "
+                        "sending callback without artifact",
+                        build_id,
+                    )
 
-            if build_log_path and build_log_path.is_file():
-                fh = open(build_log_path, "rb")
-                opened.append(fh)
-                files.append(("build_log", (build_log_path.name, fh, "text/plain")))
-            else:
-                log.error(
-                    "build_log missing for build_id=%s — sending callback without log",
-                    build_id,
-                )
+                if build_log_path and build_log_path.is_file():
+                    fh = open(build_log_path, "rb")
+                    opened.append(fh)
+                    files.append(("build_log", (build_log_path.name, fh, "text/plain")))
+                else:
+                    log.error(
+                        "build_log missing for build_id=%s — "
+                        "sending callback without log",
+                        build_id,
+                    )
 
             response = requests.post(
                 callback_url,

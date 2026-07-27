@@ -80,9 +80,10 @@ load_builder_config() {
     COMMON_DIR="${COMMON_DIR:-$SCRIPT_DIR/common}"
   fi
 
-  # Config token fills in only when CLI/env did not already provide one.
+  # Prefer CLI/env ONEPUB_TOKEN. builder.json onepub_token is legacy only.
   if [[ -z "${ONEPUB_TOKEN:-}" && -n "$configured_token" ]]; then
     ONEPUB_TOKEN="$configured_token"
+    log_info "Using legacy onepub_token from builder.json (prefer request/CLI token)"
   fi
 
   if [[ -d "$WORKSPACE_ROOT" ]]; then

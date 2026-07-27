@@ -187,7 +187,7 @@ fi
 load_builder_config || exit 1
 
 if [[ -z "${ONEPUB_TOKEN:-}" ]]; then
-  log_error "ONEPUB_TOKEN is not set. Add onepub_token to config/builder.json or pass --onepub-token."
+  log_error "ONEPUB_TOKEN is not set. Pass --onepub-token or set ONEPUB_TOKEN in the environment (API requests must send onepub_token)."
   exit 1
 fi
 

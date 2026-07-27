@@ -9,7 +9,7 @@ backend via multipart callback, then deletes `workspace/build_<id>/`.
 cd /path/to/Script_for_flutter_builder
 
 cp -n config/builder.example.json config/builder.json
-# set flutter_repo, onepub_token, callback_base_url, callback_apikey
+# set flutter_repo, callback_base_url (tokens come from each POST /build)
 
 python3 -m venv server/.venv
 source server/.venv/bin/activate
@@ -25,9 +25,7 @@ uvicorn server.app:app --host 0.0.0.0 --port 8080
   "flutter_repo": "https://github.com/company/flutter-app.git",
   "workspace_root": "workspace",
   "common_dir": "common",
-  "onepub_token": "...",
-  "callback_base_url": "http://localhost/",
-  "callback_apikey": "YOUR_API_KEY"
+  "callback_base_url": "http://localhost/"
 }
 ```
 
@@ -38,13 +36,14 @@ Only the **base URL** is configurable (`callback_base_url` or env
 
 Env overrides JSON when both are set.
 
-**GitHub auth** uses env var only (never in JSON):
+**Tokens are not stored on the Build Server.** Cron must send on every
+`POST /build`:
 
-```bash
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxx
-```
+- `github_token` (required)
+- `onepub_token` (required)
+- `callback_apikey` (optional — used as `X-API-Key` on the PHP callback)
 
-API key for callbacks is sent as header `X-API-Key`.
+API key for callbacks is sent as header `X-API-Key` when provided.
 
 ## Endpoints
 
@@ -74,13 +73,23 @@ curl -X POST "http://127.0.0.1:8080/build" \
   -F version_number=1.0.0 \
   -F platform=0 \
   -F build_type=2 \
+  -F github_token=ghp_xxx \
+  -F onepub_token=YOUR_ONEPUB_TOKEN \
   -F assets=@"/path/to/assets.zip" \
   -F play-track=internal \
-  -F playstore-json=@"/path/to/play-service-account.json"
+  -F playstore-json=@"/path/to/play-service-account.json" \
+  -F artifact_upload_url="https://BUCKET.s3.REGION.amazonaws.com/.../app.aab?X-Amz-..." \
+  -F build_log_upload_url="https://BUCKET.s3.REGION.amazonaws.com/.../build.log?X-Amz-..." \
+  -F artifact_content_type=application/octet-stream \
+  -F build_log_content_type=text/plain \
+  -F s3_storage_class=REDUCED_REDUNDANCY \
+  -F artifact_filename=app-release.aab
 ```
 
 `platform`: `0` = Android, `1` = iOS (only `0` is supported today).  
 `build_type`: `1` = APK (build only), `2` = AAB **and** upload to Play Store.  
+`github_token` / `onepub_token`: **required** on every request (not stored on the server).  
+`artifact_upload_url` + `build_log_upload_url`: S3 presigned PUT URLs — worker uploads files to S3, then callbacks PHP with **JSONString only** (no APK/AAB in the callback).  
 For `build_type=2`, `playstore-json` is required (Play Console service-account — **not** Firebase `google-services.json`).  
 `play-track`: `internal` (default) | `alpha` | `beta` | `production`.
 
@@ -122,9 +131,10 @@ build.sh → output/build_<id>/
 
 Callback sends multipart with:
 - `JSONString` — JSON metadata: `build_id`, `status` (`1`/`0`), `error_message`,
-  `build_duration`, `platform`, `build_type`, `start_time`, `end_time`
-- `artifact` — APK/AAB file on success (when available)
-- `build_log` — build log file (when available)
+  `build_duration`, `platform`, `build_type`, `start_time`, `end_time`,
+  optional `version_number`, `artifact_filename`, `s3_upload`
+- When S3 URLs were used: **no** `artifact` / `build_log` file parts (already on S3)
+- Legacy (no S3 URLs): `artifact` + `build_log` file parts
 
 The callback runs for every build outcome (clone failure, validate failure,
 flutter/fastlane failure, exceptions, and success).

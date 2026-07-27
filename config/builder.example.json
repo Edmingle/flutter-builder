@@ -2,7 +2,5 @@
   "flutter_repo": "https://github.com/company/flutter-app.git",
   "workspace_root": "workspace",
   "common_dir": "common",
-  "onepub_token": "REPLACE_WITH_ONEPUB_TOKEN",
-  "callback_base_url": "http://localhost/",
-  "callback_apikey": "YOUR_API_KEY"
+  "callback_base_url": "http://localhost/"
 }

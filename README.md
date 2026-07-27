@@ -57,13 +57,13 @@ cp config/builder.example.json config/builder.json
   "flutter_repo": "https://github.com/company/flutter-app.git",
   "workspace_root": "workspace",
   "common_dir": "common",
-  "onepub_token": "YOUR_ONEPUB_TOKEN",
-  "callback_base_url": "http://localhost/",
-  "callback_apikey": "YOUR_API_KEY"
+  "callback_base_url": "http://localhost/"
 }
 ```
 
-Also export (never commit):
+Tokens (`github_token`, `onepub_token`) are sent by cron on each `POST /build` — not stored here.
+
+Also for local CLI only:
 
 ```bash
 export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxx
@@ -83,10 +83,11 @@ export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxx
     --portal-name "ideas" \
     --web-domain "www.edmingle.academy" \
     --app-version "1.0.1" \
-    --build-type 1
+    --build-type 1 \
+    --onepub-token "YOUR_ONEPUB_TOKEN"
 ```
 
-(`--onepub-token` optional if set in `builder.json`.)
+(`GITHUB_TOKEN` must be in the environment for CLI.)
 
 ---
 
@@ -96,8 +97,6 @@ export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxx
 python3 -m venv server/.venv
 source server/.venv/bin/activate
 pip install -r server/requirements.txt
-```bash
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxx
 uvicorn server.app:app --host 0.0.0.0 --port 8080
 ```
 
@@ -114,6 +113,8 @@ curl -X POST http://127.0.0.1:8080/build \
   -F version_number=1.0.1 \
   -F platform=0 \
   -F build_type=1 \
+  -F github_token=ghp_xxx \
+  -F onepub_token=YOUR_ONEPUB_TOKEN \
   -F assets=@/path/to/assets.zip
 
 # AAB + Play Store upload (build_type=2)
@@ -128,6 +129,8 @@ curl -X POST http://127.0.0.1:8080/build \
   -F version_number=1.0.1 \
   -F platform=0 \
   -F build_type=2 \
+  -F github_token=ghp_xxx \
+  -F onepub_token=YOUR_ONEPUB_TOKEN \
   -F assets=@/path/to/assets.zip \
   -F play-track=internal \
   -F playstore-json=@/path/to/play-service-account.json

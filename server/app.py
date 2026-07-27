@@ -145,16 +145,31 @@ async def create_build(
     version_number: str = Form(...),
     platform: str = Form(PLATFORM_ANDROID),
     build_type: str = Form(...),
+    github_token: str = Form(...),
+    onepub_token: str = Form(...),
     assets: UploadFile = File(..., description="assets.zip from backend"),
     play_track: Annotated[str, Form(alias="play-track")] = "internal",
     playstore_json: Annotated[
         Optional[UploadFile],
         File(alias="playstore-json"),
     ] = None,
+    callback_apikey: str = Form(""),
+    artifact_upload_url: str = Form(""),
+    build_log_upload_url: str = Form(""),
+    artifact_content_type: str = Form("application/octet-stream"),
+    build_log_content_type: str = Form("text/plain"),
+    s3_storage_class: str = Form("REDUCED_REDUNDANCY"),
+    artifact_filename: str = Form(""),
 ):
     """
     Validate request, create workspace, save assets.zip, enqueue job.
     Returns HTTP 202 immediately — build runs in the background.
+
+    Tokens (github_token, onepub_token) must be sent by cron on every request.
+    They are not stored in builder.json.
+
+    When artifact_upload_url / build_log_upload_url are provided, the worker
+    PUTs files to S3 and callbacks PHP with JSONString only (no APK/AAB body).
 
     platform: 0 = Android, 1 = iOS (only 0 supported today)
     build_type: 1 = APK (build only), 2 = AAB + Play Store upload
@@ -170,13 +185,26 @@ async def create_build(
     version_number = require_field("version_number", version_number)
     platform = require_field("platform", platform)
     build_type = require_field("build_type", build_type)
+    github_token = require_field("github_token", github_token)
+    onepub_token = require_field("onepub_token", onepub_token)
     play_track = (play_track or "internal").strip().lower()
+    callback_apikey = (callback_apikey or "").strip()
+    artifact_upload_url = (artifact_upload_url or "").strip()
+    build_log_upload_url = (build_log_upload_url or "").strip()
+    artifact_content_type = (
+        artifact_content_type or "application/octet-stream"
+    ).strip()
+    build_log_content_type = (build_log_content_type or "text/plain").strip()
+    s3_storage_class = (s3_storage_class or "").strip()
+    artifact_filename = (artifact_filename or "").strip()
 
     upload_to_play = build_type == "2"
+    s3_mode = bool(artifact_upload_url or build_log_upload_url)
 
     log.info(
         "Incoming build request build_id=%s institution_id=%s branch=%s "
-        "platform=%s build_type=%s upload=%s play_track=%s app_name=%s",
+        "platform=%s build_type=%s upload=%s play_track=%s app_name=%s "
+        "s3_mode=%s github_token=%s onepub_token=%s",
         build_id,
         institution_id,
         branch,
@@ -185,6 +213,9 @@ async def create_build(
         upload_to_play,
         play_track,
         app_name,
+        s3_mode,
+        "present",
+        "present",
     )
 
     if not BUILD_ID_RE.match(build_id):
@@ -270,17 +301,19 @@ async def create_build(
                 },
             )
 
+    if s3_mode:
+        if not artifact_upload_url or not build_log_upload_url:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "success": False,
+                    "build_id": build_id,
+                    "error": "When using S3 uploads, both artifact_upload_url "
+                    "and build_log_upload_url are required",
+                },
+            )
+
     cfg = load_builder_config()
-    if not (cfg.get("onepub_token") or "").strip():
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "success": False,
-                "build_id": build_id,
-                "error": "onepub_token missing in config/builder.json "
-                "(token must not come from the backend request)",
-            },
-        )
 
     if not BUILD_SH.is_file():
         raise HTTPException(
@@ -356,6 +389,15 @@ async def create_build(
         build_type=build_type,
         assets_zip_path=str(assets_zip_path),
         workspace=str(build_workspace),
+        github_token=github_token,
+        onepub_token=onepub_token,
+        callback_apikey=callback_apikey,
+        artifact_upload_url=artifact_upload_url,
+        build_log_upload_url=build_log_upload_url,
+        artifact_content_type=artifact_content_type,
+        build_log_content_type=build_log_content_type,
+        s3_storage_class=s3_storage_class,
+        artifact_filename=artifact_filename,
         upload=upload_to_play,
         playstore_json_path=playstore_json_path,
         play_track=play_track,

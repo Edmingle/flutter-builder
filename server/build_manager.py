@@ -1,8 +1,9 @@
 """
 Background Build Manager (single build at a time).
 
-Executes ./build.sh with GITHUB_TOKEN from the environment, always notifies the
-PHP backend via callback (success or failure), then cleans the workspace.
+Executes ./build.sh with github_token / onepub_token from each request,
+always notifies the PHP backend via callback (success or failure), then
+cleans the workspace.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from server.callback import (
     cleanup_build_output,
     cleanup_build_workspace,
     discover_artifact,
+    put_file_to_presigned_url,
     resolve_callback_url,
     send_callback,
     write_build_log,
@@ -46,14 +48,18 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def redact_secrets(text: str) -> str:
-    """Strip GITHUB_TOKEN from text before logging or writing build logs."""
+def redact_secrets(text: str, *extra_secrets: str) -> str:
+    """Strip secrets from text before logging or writing build logs."""
     if not text:
         return text
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if token:
-        from urllib.parse import quote
+    from urllib.parse import quote
 
+    secrets = [s for s in extra_secrets if s]
+    env_token = os.environ.get("GITHUB_TOKEN", "")
+    if env_token:
+        secrets.append(env_token)
+
+    for token in secrets:
         text = text.replace(token, "***REDACTED***")
         text = text.replace(quote(token, safe=""), "***REDACTED***")
         text = text.replace(f"x-access-token:{token}", "x-access-token:***REDACTED***")
@@ -74,6 +80,15 @@ class BuildJob:
     build_type: str
     assets_zip_path: str
     workspace: str
+    github_token: str = ""
+    onepub_token: str = ""
+    callback_apikey: str = ""
+    artifact_upload_url: str = ""
+    build_log_upload_url: str = ""
+    artifact_content_type: str = "application/octet-stream"
+    build_log_content_type: str = "text/plain"
+    s3_storage_class: str = "REDUCED_REDUNDANCY"
+    artifact_filename: str = ""
     upload: bool = False
     playstore_json_path: Optional[str] = None
     play_track: str = "internal"
@@ -124,6 +139,7 @@ class BuildManager:
         # Path is fixed inside resolve_callback_url().
         base = (data.get("callback_base_url") or "").strip()
         self.callback_url = resolve_callback_url(base)
+        # Prefer per-request apikey; builder.json callback_apikey is legacy/optional.
         self.callback_apikey = (data.get("callback_apikey") or "").strip()
         if self.callback_url:
             log.info("Callback enabled → %s", self.callback_url)
@@ -246,15 +262,17 @@ class BuildManager:
         stderr = ""
 
         try:
-            # Fail fast if GitHub token missing (still callbacks below).
-            if not (os.environ.get("GITHUB_TOKEN") or "").strip():
-                failure_reason = (
-                    "GITHUB_TOKEN environment variable is not set. "
-                    "export GITHUB_TOKEN before starting the Build Server."
-                )
+            # Tokens come from the cron/request — never from builder.json.
+            if not (job.github_token or "").strip():
+                failure_reason = "github_token missing on build request"
                 message = failure_reason
                 write_build_log(build_log_path, "", failure_reason)
-                log.error("build_id=%s aborted: GITHUB_TOKEN missing", job.build_id)
+                log.error("build_id=%s aborted: github_token missing", job.build_id)
+            elif not (job.onepub_token or "").strip():
+                failure_reason = "onepub_token missing on build request"
+                message = failure_reason
+                write_build_log(build_log_path, "", failure_reason)
+                log.error("build_id=%s aborted: onepub_token missing", job.build_id)
             else:
                 cmd = [
                     str(self.build_sh),
@@ -278,6 +296,8 @@ class BuildManager:
                     job.build_type,
                     "--output",
                     str(build_output_dir),
+                    "--onepub-token",
+                    job.onepub_token,
                 ]
 
                 if job.upload and job.playstore_json_path:
@@ -298,7 +318,8 @@ class BuildManager:
 
                 env = os.environ.copy()
                 env["CONFIG_DIR"] = str(self.config_dir)
-                # GITHUB_TOKEN already in env — never log it.
+                env["GITHUB_TOKEN"] = job.github_token
+                env["ONEPUB_TOKEN"] = job.onepub_token
 
                 log.info(
                     "Executing pipeline via build.sh for build_id=%s upload=%s",
@@ -314,8 +335,12 @@ class BuildManager:
                     text=True,
                     check=False,
                 )
-                stdout = redact_secrets(result.stdout or "")
-                stderr = redact_secrets(result.stderr or "")
+                stdout = redact_secrets(
+                    result.stdout or "", job.github_token, job.onepub_token
+                )
+                stderr = redact_secrets(
+                    result.stderr or "", job.github_token, job.onepub_token
+                )
                 write_build_log(build_log_path, stdout, stderr)
 
                 if stdout:
@@ -357,7 +382,9 @@ class BuildManager:
             status = BuildStatus.FAILED
             failure_reason = f"Unhandled exception: {exc}"
             message = failure_reason
-            tb = redact_secrets(traceback.format_exc())
+            tb = redact_secrets(
+                traceback.format_exc(), job.github_token, job.onepub_token
+            )
             log.exception("Unhandled pipeline exception for build_id=%s", job.build_id)
             try:
                 if build_log_path.exists():
@@ -369,6 +396,10 @@ class BuildManager:
                     write_build_log(build_log_path, "", tb)
             except OSError:
                 log.exception("Could not write exception to build log")
+
+        # Drop secrets from memory after the pipeline finishes.
+        job.github_token = ""
+        job.onepub_token = ""
 
         end_iso = _utc_now_iso()
         duration = int(round(time.monotonic() - started_mono))
@@ -382,6 +413,76 @@ class BuildManager:
             job.error = None if status == BuildStatus.SUCCESS else (failure_reason or message)
             self._jobs[job.build_id] = job
 
+        # S3 presigned upload (cron provides URLs) → metadata-only callback.
+        # Legacy: no URLs → multipart file callback.
+        s3_direct = False
+        artifact_filename = (job.artifact_filename or "").strip()
+        if artifact is not None and not artifact_filename:
+            artifact_filename = artifact.name
+
+        log_url = (job.build_log_upload_url or "").strip()
+        artifact_url = (job.artifact_upload_url or "").strip()
+        storage_class = (job.s3_storage_class or "").strip()
+        used_s3 = bool(log_url and artifact_url)
+
+        if used_s3:
+            log_ok = False
+            if build_log_path.is_file():
+                log_ok = put_file_to_presigned_url(
+                    url=log_url,
+                    file_path=build_log_path,
+                    content_type=job.build_log_content_type or "text/plain",
+                    storage_class=storage_class,
+                    label=f"build_log build_id={job.build_id}",
+                )
+            else:
+                log.error(
+                    "build_log missing locally for build_id=%s — cannot PUT to S3",
+                    job.build_id,
+                )
+
+            artifact_ok = True
+            if status == BuildStatus.SUCCESS:
+                if artifact is not None and artifact.is_file():
+                    artifact_ok = put_file_to_presigned_url(
+                        url=artifact_url,
+                        file_path=artifact,
+                        content_type=job.artifact_content_type
+                        or "application/octet-stream",
+                        storage_class=storage_class,
+                        label=f"artifact build_id={job.build_id}",
+                    )
+                else:
+                    log.error(
+                        "artifact missing locally for successful build_id=%s — "
+                        "cannot PUT to S3",
+                        job.build_id,
+                    )
+                    artifact_ok = False
+
+            s3_direct = True  # never send files to PHP when S3 URLs were provided
+            if not (log_ok and artifact_ok):
+                s3_err = "S3 upload failed"
+                if not log_ok and not artifact_ok:
+                    s3_err = "S3 upload failed for artifact and build_log"
+                elif not log_ok:
+                    s3_err = "S3 upload failed for build_log"
+                else:
+                    s3_err = "S3 upload failed for artifact"
+                log.error("build_id=%s %s", job.build_id, s3_err)
+                if status == BuildStatus.SUCCESS:
+                    status = BuildStatus.FAILED
+                    failure_reason = s3_err
+                    message = s3_err
+                    with self._lock:
+                        job.status = status
+                        job.error = failure_reason
+                        self._jobs[job.build_id] = job
+
+        # Clear URLs from memory (signed; treat as sensitive).
+        job.artifact_upload_url = ""
+        job.build_log_upload_url = ""
+
         # Callback must always run (success or failure).
         # Wire: status 1=success / 0=failed; error_message merges message + failure_reason.
         callback_success = False
@@ -390,10 +491,12 @@ class BuildManager:
             if status == BuildStatus.SUCCESS
             else (failure_reason or message or "Build failed")
         )
+        callback_apikey = (job.callback_apikey or self.callback_apikey or "").strip()
+        job.callback_apikey = ""
         try:
             callback_success = send_callback(
                 callback_url=self.callback_url,
-                callback_apikey=self.callback_apikey,
+                callback_apikey=callback_apikey,
                 build_id=job.build_id,
                 status=status.value,
                 error_message=error_message,
@@ -402,8 +505,13 @@ class BuildManager:
                 build_type=job.build_type,
                 start_time=start_iso,
                 end_time=end_iso,
-                artifact_path=artifact if status == BuildStatus.SUCCESS else None,
-                build_log_path=build_log_path,
+                version_number=job.version_number,
+                artifact_filename=artifact_filename,
+                artifact_path=None
+                if s3_direct
+                else (artifact if status == BuildStatus.SUCCESS else None),
+                build_log_path=None if s3_direct else build_log_path,
+                s3_direct=s3_direct,
             )
         except Exception:
             log.exception(
