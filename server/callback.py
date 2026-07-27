@@ -2,7 +2,8 @@
 Backend callback after build completion.
 
 Sends multipart/form-data to callback_url with retries.
-Always attaches the build log. Attaches APK/AAB on SUCCESS when available.
+Metadata goes in form field JSONString; files stay as separate parts
+(artifact on success, build_log when available).
 
 Only the PHP base URL is configurable (env CALLBACK_BASE_URL or
 builder.json callback_base_url). The callback path is fixed.
@@ -10,12 +11,13 @@ builder.json callback_base_url). The callback path is fixed.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import requests
 
@@ -42,6 +44,13 @@ def resolve_callback_url(base_url: str = "") -> str:
     if not base:
         return ""
     return f"{base.rstrip('/')}/{CALLBACK_PATH}"
+
+
+def _as_int(value: Any, default: Union[int, Any] = 0) -> Any:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def discover_artifact(build_output_dir: Path) -> Optional[Path]:
@@ -105,11 +114,12 @@ def send_callback(
     """
     POST multipart callback with up to 3 attempts.
     Returns True on any 2xx response. Never raises.
-    Always attempts to attach build_log when the file exists.
 
-    Wire contract:
-      status: "1" = success, "0" = failed
-      error_message: failure text (empty on success)
+    Wire contract (PHP nuSource):
+      - JSONString: JSON metadata blob
+      - artifact: file (success only, when available)
+      - build_log: file (when available)
+      status inside JSON: 1 = success, 0 = failed
     """
     if not callback_url:
         log.error(
@@ -119,16 +129,18 @@ def send_callback(
         return False
 
     is_success = status == "SUCCESS"
-    data = {
-        "build_id": str(build_id),
-        "status": "1" if is_success else "0",
+    status_code = 1 if is_success else 0
+    payload = {
+        "build_id": _as_int(build_id, build_id),
+        "status": status_code,
         "error_message": (error_message or "") if not is_success else "",
-        "build_duration": str(build_duration),
-        "platform": platform,
-        "build_type": str(build_type),
+        "build_duration": _as_int(build_duration, 0),
+        "platform": _as_int(platform, platform),
+        "build_type": _as_int(build_type, build_type),
         "start_time": start_time,
         "end_time": end_time,
     }
+    data = {"JSONString": json.dumps(payload, separators=(",", ":"))}
 
     headers = {"X-API-Key": callback_apikey} if callback_apikey else {}
 
@@ -147,7 +159,7 @@ def send_callback(
                 build_id,
                 attempt,
                 callback_url,
-                data["status"],
+                status_code,
             )
 
         files: List[Tuple[str, tuple]] = []
@@ -243,10 +255,11 @@ def cleanup_build_output(build_output_dir: Path) -> None:
         log.info("Output cleanup skipped — already gone: %s", build_output_dir)
         return
     try:
+        log.info("Cleaning output: %s", build_output_dir)
         shutil.rmtree(build_output_dir)
-        log.info("Deleted build output directory: %s", build_output_dir)
+        log.info("Output deleted: %s", build_output_dir)
     except OSError as exc:
-        log.error("Failed to delete build output %s: %s", build_output_dir, exc)
+        log.error("Output cleanup failed for %s: %s", build_output_dir, exc)
 
 
 def cleanup_build_log(build_log_path: Path) -> None:
@@ -256,6 +269,6 @@ def cleanup_build_log(build_log_path: Path) -> None:
         return
     try:
         build_log_path.unlink()
-        log.info("Deleted build log: %s", build_log_path)
+        log.info("Build log deleted: %s", build_log_path)
     except OSError as exc:
-        log.error("Failed to delete build log %s: %s", build_log_path, exc)
+        log.error("Build log cleanup failed for %s: %s", build_log_path, exc)

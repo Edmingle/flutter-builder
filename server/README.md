@@ -120,11 +120,11 @@ build.sh → output/build_<id>/
    → next queued job
 ```
 
-Callback fields: `build_id`, `status` (`1` success / `0` failed),
-`error_message` (failure text; empty on success), `build_duration`,
-`start_time`, `end_time`, `platform` (`0` Android / `1` iOS),
-`build_type` (`1` APK / `2` AAB)  
-Files: `artifact` (success when available), `build_log` (**always** when available)
+Callback sends multipart with:
+- `JSONString` — JSON metadata: `build_id`, `status` (`1`/`0`), `error_message`,
+  `build_duration`, `platform`, `build_type`, `start_time`, `end_time`
+- `artifact` — APK/AAB file on success (when available)
+- `build_log` — build log file (when available)
 
 The callback runs for every build outcome (clone failure, validate failure,
 flutter/fastlane failure, exceptions, and success).
