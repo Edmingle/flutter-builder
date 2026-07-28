@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 import os
 import json
+from typing import Optional
 
 workspace = Path(os.environ.get("WORKSPACE", ""))
 if not workspace:
@@ -88,11 +89,46 @@ print(f"[replace_config] APP_VERSION={APP_VERSION}")
 print(f"[replace_config] root={root}")
 
 
-def apply_replacements(txt: str) -> str:
-    txt = txt.replace("com.edmingle.app", APP_BUNDLE_ID)
+PLACEHOLDER_BUNDLE_ID = "com.edmingle.app"
+
+
+def replace_bundle_id(txt: str) -> str:
+    """
+    Swap Play/application id only.
+
+    Do NOT rewrite Java/Kotlin `package`, AGP `namespace`, or AndroidManifest
+    `package=` — those define MainActivity's FQCN and must stay stable while
+    applicationId becomes APP_BUNDLE_ID (e.g. com.edmingle.learn).
+    """
+    out = []
+    for line in txt.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if re.match(r"package\s+\S", stripped):
+            out.append(line)
+            continue
+        if re.search(r"\bnamespace\b", stripped) and PLACEHOLDER_BUNDLE_ID in line:
+            out.append(line)
+            continue
+        if re.search(
+            r"""\bpackage\s*=\s*['"]""" + re.escape(PLACEHOLDER_BUNDLE_ID) + r"""['"]""",
+            line,
+        ):
+            out.append(line)
+            continue
+        out.append(line.replace(PLACEHOLDER_BUNDLE_ID, APP_BUNDLE_ID))
+    return "".join(out)
+
+
+# Portal slug is only swapped in this Dart file (not a global search/replace).
+PORTAL_NAME_FILE = Path("lib/utils/flavor_utils.dart")
+
+
+def apply_replacements(txt: str, rel_path: Optional[Path] = None) -> str:
+    txt = replace_bundle_id(txt)
     txt = txt.replace("Edmingle Demo", APP_NAME)
     txt = txt.replace("enterpriseplanportal.edmingle.com", WEB_DOMAIN)
-    txt = txt.replace("__BUILD_PORTAL_NAME__", PORTAL_NAME)
+    if rel_path is not None and rel_path == PORTAL_NAME_FILE:
+        txt = txt.replace("enterpriseplanportal", PORTAL_NAME)
     return txt
 
 
@@ -169,11 +205,12 @@ for folder in ("android", "lib", "ios", "test"):
             continue
 
         text = file.read_text(errors="ignore")
+        rel = file.relative_to(root)
 
-        updated = apply_replacements(text)
+        updated = apply_replacements(text, rel_path=rel)
 
         if updated != text:
             file.write_text(updated)
-            print(f"[replace_config] Updated: {file.relative_to(root)}")
+            print(f"[replace_config] Updated: {rel}")
 
 print("Replacement completed.")
