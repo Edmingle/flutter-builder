@@ -295,6 +295,8 @@ echo ">>> flutter pub get"
 flutter pub get
 echo ">>> dart run intl_utils:generate"
 dart run intl_utils:generate
+echo ">>> dart run flutter_launcher_icons"
+dart run flutter_launcher_icons
 log_duration "Flutter"
 echo ""
 
