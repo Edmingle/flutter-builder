@@ -70,6 +70,7 @@ platform :android do
       package_name: package_name,
       track: track,
       release_status: release_status,
+      timeout: 1200,
       skip_upload_metadata: true,
       skip_upload_images: true,
       skip_upload_screenshots: true,
