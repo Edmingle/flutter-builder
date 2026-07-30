@@ -259,7 +259,6 @@ class BuildManager:
         failure_reason: Optional[str] = None
         artifact: Optional[Path] = None
         stdout = ""
-        stderr = ""
 
         try:
             # Tokens come from the cron/request — never from builder.json.
@@ -327,41 +326,54 @@ class BuildManager:
                     job.upload,
                 )
 
-                result = subprocess.run(
-                    cmd,
-                    cwd=str(self.repo_root),
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                stdout = redact_secrets(
-                    result.stdout or "", job.github_token, job.onepub_token
-                )
-                stderr = redact_secrets(
-                    result.stderr or "", job.github_token, job.onepub_token
-                )
-                write_build_log(build_log_path, stdout, stderr)
+                # Merge stderr into stdout so build output remains ordered, and
+                # append each line immediately for the SSE log endpoint.
+                output_lines = []
+                build_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with build_log_path.open(
+                    "w", encoding="utf-8", errors="replace"
+                ) as build_log:
+                    build_log.write("===== BUILD OUTPUT =====\n")
+                    build_log.flush()
+
+                    process = subprocess.Popen(
+                        cmd,
+                        cwd=str(self.repo_root),
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        errors="replace",
+                    )
+                    if process.stdout is None:
+                        raise RuntimeError("Could not capture build.sh output")
+
+                    for line in process.stdout:
+                        safe_line = redact_secrets(
+                            line, job.github_token, job.onepub_token
+                        )
+                        output_lines.append(safe_line)
+                        build_log.write(safe_line)
+                        build_log.flush()
+
+                    returncode = process.wait()
+
+                stdout = "".join(output_lines)
 
                 if stdout:
                     log.info(
-                        "build.sh stdout (build_id=%s):\n%s",
+                        "build.sh output (build_id=%s):\n%s",
                         job.build_id,
                         stdout[-8000:],
                     )
-                if stderr:
-                    log.warning(
-                        "build.sh stderr (build_id=%s):\n%s",
-                        job.build_id,
-                        stderr[-4000:],
-                    )
 
-                if result.returncode != 0:
-                    err_tail = (stderr or stdout or "").strip().splitlines()
+                if returncode != 0:
+                    err_tail = stdout.strip().splitlines()
                     failure_reason = (
                         err_tail[-1]
                         if err_tail
-                        else f"build.sh exited with code {result.returncode}"
+                        else f"build.sh exited with code {returncode}"
                     )
                     message = failure_reason
                     log.error("Job failed build_id=%s: %s", job.build_id, failure_reason)

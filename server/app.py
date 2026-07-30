@@ -3,6 +3,7 @@ Flutter Build Server — HTTP API (Stage 6)
 
 POST /build         — validate, save assets.zip, queue job → HTTP 202
 GET  /build/{id}    — build status
+GET  /build/{id}/logs/stream — live build logs (SSE)
 GET  /health        — UP + running_build + queue_size + callback_enabled
 
 build_type=2 (AAB) also uploads to Google Play when playstore-json is provided.
@@ -10,6 +11,7 @@ build_type=2 (AAB) also uploads to Google Play when playstore-json is provided.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -17,7 +19,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from server.build_manager import BuildJob, BuildManager, BuildStatus, get_manager
 
@@ -99,6 +101,55 @@ def require_field(name: str, value: Optional[str]) -> str:
     return str(value).strip()
 
 
+def _read_log_chunk(log_path: Path, position: int) -> tuple[str, int]:
+    try:
+        with log_path.open(encoding="utf-8", errors="replace") as log_file:
+            log_file.seek(position)
+            chunk = log_file.read()
+            return chunk, log_file.tell()
+    except FileNotFoundError:
+        # Callback cleanup can remove the file between exists() and open().
+        return "", position
+
+
+async def _build_log_events(
+    manager: BuildManager, build_id: str, log_path: Path
+):
+    position = 0
+    last_keepalive = asyncio.get_running_loop().time()
+
+    while True:
+        if log_path.is_file():
+            chunk, position = await asyncio.to_thread(
+                _read_log_chunk, log_path, position
+            )
+            if chunk:
+                yield f"event: log\ndata: {json.dumps(chunk)}\n\n"
+
+        current_job = manager.get_job(build_id)
+        if current_job is None:
+            yield 'event: error\ndata: "Build no longer exists"\n\n'
+            return
+
+        if current_job.status in (BuildStatus.SUCCESS, BuildStatus.FAILED):
+            payload = json.dumps(
+                {
+                    "build_id": build_id,
+                    "status": current_job.status.value,
+                    "error": current_job.error,
+                }
+            )
+            yield f"event: done\ndata: {payload}\n\n"
+            return
+
+        now = asyncio.get_running_loop().time()
+        if now - last_keepalive >= 15:
+            yield ": keep-alive\n\n"
+            last_keepalive = now
+
+        await asyncio.sleep(0.5)
+
+
 @app.get("/health")
 def health():
     try:
@@ -131,6 +182,34 @@ def get_build(build_id: str):
     if job.error and job.status == BuildStatus.FAILED:
         body["error"] = job.error
     return body
+
+
+@app.get("/build/{build_id}/logs/stream")
+async def stream_build_logs(build_id: str):
+    """Stream the current build log as Server-Sent Events."""
+    manager = get_manager()
+    job = manager.get_job(build_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "success": False,
+                "build_id": build_id,
+                "error": f"Unknown build_id: {build_id}",
+            },
+        )
+
+    log_path = manager.logs_dir / f"build_{build_id}.log"
+
+    return StreamingResponse(
+        _build_log_events(manager, build_id, log_path),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/build", status_code=202)
