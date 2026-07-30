@@ -80,7 +80,15 @@ cp "$ASSETS/logo.png" \
   "$APP/assets/logos/${PORTAL_NAME}-logo.png"
 
 echo "Adding App Icon..."
-cp "$ASSETS/logo.png" \
+if [[ -f "$ASSETS/app-icon.png" ]]; then
+  echo "Using provided app-icon.png"
+  APP_ICON_SOURCE="$ASSETS/app-icon.png"
+else
+  echo "app-icon.png not provided; using logo.png"
+  APP_ICON_SOURCE="$ASSETS/logo.png"
+fi
+
+cp "$APP_ICON_SOURCE" \
   "$APP/assets/logos/app-icon.png"
 
 echo "Adding edmingleKey.jks..."

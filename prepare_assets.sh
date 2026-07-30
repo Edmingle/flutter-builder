@@ -36,6 +36,9 @@ ZIP must contain (portal assets only — NOT mobilertc):
   edmingleKey.jks
   key.properties
 
+Optional:
+  app-icon.png  (falls back to logo.png when omitted)
+
 Supports ZIP layouts:
   1) assets.zip → assets/logo.png ...
   2) assets.zip → logo.png ... (flat)
