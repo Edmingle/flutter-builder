@@ -291,6 +291,22 @@ cd "$APP"
 
 echo ">>> flutter clean"
 flutter clean
+
+if [[ -f "$APP/android/gradlew" ]]; then
+  echo ">>> stopping Gradle daemons"
+  (
+    cd "$APP/android"
+    bash ./gradlew --stop || true
+  )
+  echo ">>> cleaning Gradle build"
+  (
+    cd "$APP/android"
+    bash ./gradlew clean
+  )
+else
+  echo "WARNING: Gradle wrapper not found; continuing without Gradle clean." >&2
+fi
+
 echo ">>> flutter pub get"
 flutter pub get
 echo ">>> dart run intl_utils:generate"
