@@ -42,6 +42,7 @@ app = FastAPI(
 
 BUILD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 VALID_PLAY_TRACKS = {"internal", "alpha", "beta", "production"}
+VALID_PLAY_RELEASE_STATUSES = {"completed", "draft", "halted", "inProgress"}
 
 # Platform constants (must match PHP / backend contract)
 PLATFORM_ANDROID = "0"
@@ -228,6 +229,9 @@ async def create_build(
     onepub_token: str = Form(...),
     assets: UploadFile = File(..., description="assets.zip from backend"),
     play_track: Annotated[str, Form(alias="play-track")] = "internal",
+    play_release_status: Annotated[
+        str, Form(alias="play-release-status")
+    ] = "completed",
     playstore_json: Annotated[
         Optional[UploadFile],
         File(alias="playstore-json"),
@@ -253,6 +257,9 @@ async def create_build(
     platform: 0 = Android, 1 = iOS (only 0 supported today)
     build_type: 1 = APK (build only), 2 = AAB + Play Store upload
     For build_type=2, playstore-json (Play Console service-account) is required.
+    play-track: real Play track (internal|alpha|beta|production).
+    play-release-status: completed (default)|draft|halted|inProgress — use draft
+    with play-track=internal for new-app uploads.
     """
     build_id = require_field("build_id", build_id)
     institution_id = require_field("institution_id", institution_id)
@@ -267,6 +274,11 @@ async def create_build(
     github_token = require_field("github_token", github_token)
     onepub_token = require_field("onepub_token", onepub_token)
     play_track = (play_track or "internal").strip().lower()
+    play_release_status = (play_release_status or "completed").strip()
+    if play_release_status.lower() == "inprogress":
+        play_release_status = "inProgress"
+    else:
+        play_release_status = play_release_status.lower()
     callback_apikey = (callback_apikey or "").strip()
     artifact_upload_url = (artifact_upload_url or "").strip()
     build_log_upload_url = (build_log_upload_url or "").strip()
@@ -282,7 +294,8 @@ async def create_build(
 
     log.info(
         "Incoming build request build_id=%s institution_id=%s branch=%s "
-        "platform=%s build_type=%s upload=%s play_track=%s app_name=%s "
+        "platform=%s build_type=%s upload=%s play_track=%s "
+        "play_release_status=%s app_name=%s "
         "s3_mode=%s github_token=%s onepub_token=%s",
         build_id,
         institution_id,
@@ -291,6 +304,7 @@ async def create_build(
         build_type,
         upload_to_play,
         play_track,
+        play_release_status,
         app_name,
         s3_mode,
         "present",
@@ -344,6 +358,17 @@ async def create_build(
                 "success": False,
                 "build_id": build_id,
                 "error": "play-track must be one of: internal, alpha, beta, production",
+            },
+        )
+
+    if play_release_status not in VALID_PLAY_RELEASE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "success": False,
+                "build_id": build_id,
+                "error": "play-release-status must be one of: "
+                "completed, draft, halted, inProgress",
             },
         )
 
@@ -480,6 +505,7 @@ async def create_build(
         upload=upload_to_play,
         playstore_json_path=playstore_json_path,
         play_track=play_track,
+        play_release_status=play_release_status,
     )
 
     try:

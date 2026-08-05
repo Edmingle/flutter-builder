@@ -67,6 +67,7 @@ Optional:
   --upload           After build, upload to Google Play via Fastlane
   --playstore-json   Path to Play Console service-account JSON
   --play-track       Play track: internal|alpha|beta|production (default: internal)
+  --play-release-status  completed|draft|halted|inProgress (default: completed)
 
 Repository URL, workspace root, common dir, and OnePub token come from
 config/builder.json (mobilertc lives in common/mobilertc — not assets.zip).
@@ -86,6 +87,7 @@ BUILD_TYPE="2"
 UPLOAD="false"
 PLAYSTORE_JSON="${PLAYSTORE_JSON:-}"
 PLAY_TRACK="${PLAY_TRACK:-internal}"
+PLAY_RELEASE_STATUS="${PLAY_RELEASE_STATUS:-completed}"
 ASSETS_ZIP=""
 
 while [[ $# -gt 0 ]]; do
@@ -145,6 +147,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --play-track)
       PLAY_TRACK="${2:-}"
+      shift 2
+      ;;
+    --play-release-status)
+      PLAY_RELEASE_STATUS="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -220,7 +226,7 @@ if [[ "$UPLOAD" == "true" ]]; then
 fi
 
 export APP_NAME APP_BUNDLE_ID PORTAL_NAME WEB_DOMAIN APP_VERSION ONEPUB_TOKEN BUILD_TYPE
-export PLAYSTORE_JSON PLAY_TRACK
+export PLAYSTORE_JSON PLAY_TRACK PLAY_RELEASE_STATUS
 export BUILD_ID BRANCH FLUTTER_REPO WORKSPACE_ROOT BUILD_WORKSPACE COMMON_DIR
 export WORKSPACE APP ASSETS SCRIPT_DIR CONFIG_DIR SERVER_DIR OUTPUT LOGS
 
@@ -244,6 +250,7 @@ echo "UPLOAD           : $UPLOAD"
 if [[ "$UPLOAD" == "true" ]]; then
   echo "PLAYSTORE_JSON   : $PLAYSTORE_JSON"
   echo "PLAY_TRACK       : $PLAY_TRACK"
+  echo "PLAY_RELEASE_STATUS: $PLAY_RELEASE_STATUS"
 fi
 echo "=========================================="
 echo ""
@@ -325,7 +332,7 @@ cd "$APP/android"
 set +e
 if [[ "$UPLOAD" == "true" ]]; then
   echo ">>> fastlane release (build + upload_to_play_store)"
-  fastlane release buildType:"$BUILD_TYPE" playstore_json:"$PLAYSTORE_JSON" track:"$PLAY_TRACK"
+  fastlane release buildType:"$BUILD_TYPE" playstore_json:"$PLAYSTORE_JSON" track:"$PLAY_TRACK" release_status:"$PLAY_RELEASE_STATUS"
 else
   echo ">>> fastlane build"
   fastlane build buildType:"$BUILD_TYPE"

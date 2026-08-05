@@ -91,7 +91,8 @@ curl -X POST "http://127.0.0.1:8080/build" \
 `github_token` / `onepub_token`: **required** on every request (not stored on the server).  
 `artifact_upload_url` + `build_log_upload_url`: S3 presigned PUT URLs — worker uploads files to S3, then callbacks PHP with **JSONString only** (no APK/AAB in the callback).  
 For `build_type=2`, `playstore-json` is required (Play Console service-account — **not** Firebase `google-services.json`).  
-`play-track`: `internal` (default) | `alpha` | `beta` | `production`.
+`play-track`: `internal` (default) | `alpha` | `beta` | `production`.  
+`play-release-status`: `completed` (default) | `draft` | `halted` | `inProgress` — use `draft` with `play-track=internal` for new-app uploads.
 
 Response:
 

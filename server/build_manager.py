@@ -92,6 +92,7 @@ class BuildJob:
     upload: bool = False
     playstore_json_path: Optional[str] = None
     play_track: str = "internal"
+    play_release_status: str = "completed"
     status: BuildStatus = BuildStatus.QUEUED
     error: Optional[str] = None
     build_duration: Optional[int] = None
@@ -307,12 +308,16 @@ class BuildManager:
                             job.playstore_json_path,
                             "--play-track",
                             job.play_track or "internal",
+                            "--play-release-status",
+                            job.play_release_status or "completed",
                         ]
                     )
                     log.info(
-                        "Play Store upload enabled for build_id=%s track=%s",
+                        "Play Store upload enabled for build_id=%s track=%s "
+                        "release_status=%s",
                         job.build_id,
                         job.play_track,
+                        job.play_release_status,
                     )
 
                 env = os.environ.copy()
