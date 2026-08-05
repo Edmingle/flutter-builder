@@ -381,14 +381,26 @@ class BuildManager:
                     status = BuildStatus.SUCCESS
                     message = "Build completed successfully"
                     failure_reason = None
-                    artifact = discover_artifact(build_output_dir)
-                    if artifact is None:
-                        log.error(
-                            "Successful build_id=%s but artifact missing under %s",
-                            job.build_id,
-                            build_output_dir,
-                        )
                     log.info("Job completed build_id=%s", job.build_id)
+
+                # Collect artifact even when the pipeline failed (e.g. Play Store
+                # upload failed after AAB/APK was built and copied to output/).
+                discovered = discover_artifact(build_output_dir)
+                if discovered is not None:
+                    artifact = discovered
+                    if returncode != 0:
+                        log.info(
+                            "Artifact found for failed build_id=%s — "
+                            "will upload to S3 if configured: %s",
+                            job.build_id,
+                            artifact.name,
+                        )
+                elif returncode == 0:
+                    log.error(
+                        "Successful build_id=%s but artifact missing under %s",
+                        job.build_id,
+                        build_output_dir,
+                    )
 
         except Exception as exc:
             status = BuildStatus.FAILED
@@ -454,23 +466,28 @@ class BuildManager:
                 )
 
             artifact_ok = True
-            if status == BuildStatus.SUCCESS:
-                if artifact is not None and artifact.is_file():
-                    artifact_ok = put_file_to_presigned_url(
-                        url=artifact_url,
-                        file_path=artifact,
-                        content_type=job.artifact_content_type
-                        or "application/octet-stream",
-                        storage_class=storage_class,
-                        label=f"artifact build_id={job.build_id}",
-                    )
-                else:
-                    log.error(
-                        "artifact missing locally for successful build_id=%s — "
-                        "cannot PUT to S3",
+            if artifact is not None and artifact.is_file():
+                artifact_ok = put_file_to_presigned_url(
+                    url=artifact_url,
+                    file_path=artifact,
+                    content_type=job.artifact_content_type
+                    or "application/octet-stream",
+                    storage_class=storage_class,
+                    label=f"artifact build_id={job.build_id}",
+                )
+                if status != BuildStatus.SUCCESS:
+                    log.info(
+                        "Uploaded artifact for failed build_id=%s to S3: %s",
                         job.build_id,
+                        artifact.name,
                     )
-                    artifact_ok = False
+            elif status == BuildStatus.SUCCESS:
+                log.error(
+                    "artifact missing locally for successful build_id=%s — "
+                    "cannot PUT to S3",
+                    job.build_id,
+                )
+                artifact_ok = False
 
             s3_direct = True  # never send files to PHP when S3 URLs were provided
             if not (log_ok and artifact_ok):
@@ -521,7 +538,11 @@ class BuildManager:
                 artifact_filename=artifact_filename,
                 artifact_path=None
                 if s3_direct
-                else (artifact if status == BuildStatus.SUCCESS else None),
+                else (
+                    artifact
+                    if artifact is not None and artifact.is_file()
+                    else None
+                ),
                 build_log_path=None if s3_direct else build_log_path,
                 s3_direct=s3_direct,
             )
